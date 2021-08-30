@@ -151,7 +151,7 @@ groups = these_train_data['idnum'].to_numpy()
     
 logging.debug("these_train_data shape is {}".format(these_train_data.shape))    
 
-outname="out/abcd-ml_{}{}".format(args.predictorset, model_suffix)
+outname="out/abcd-ml_{}_{}{}".format(args.predictorset, args.outcome, model_suffix)
 logging.info("outfile is {}".format(outname))
 
 N_outer=args.n_outer
