@@ -15,9 +15,9 @@ import logging
 
 print('setting up parser')
 # Models: Age + Sex in all
-#   *Day level: 1-7, 1-14, 1-21
-#   *Week level: 1, 1-2, 1-3
-#   *Summary
+#   Day level: 1-7, 1-14, 1-21
+#   Week level: 1, 1-2, 1-3
+#   Summary
 #   Time-since CBCL interaction 
 #   Fitbit variables: Most common versus everything
 #     Step count, HR (resting), Sleep duration
@@ -35,7 +35,10 @@ print('setting up parser')
 parser = argparse.ArgumentParser(description='Run some ML models on ABCD fitbit data')
 parser.add_argument('-p', '--predictorset', metavar='pset', type=str, 
                     help='A string specifying which predictor set to use. See code for specifics. \
-                    Some sets require you to also specify the summary level (-s) and a time subset (-t).')
+                    Some sets require you to also specify the summary level (-s) and a time subset (-t). \
+                    Possible values are "baseline" (sex + age), "fbmin" (Fitbit minimal), \
+                    "pa" (physical activity), "sleep" (sleep), "pasleep" (both pa and sleep in \
+                    subsample with sleep data).')
 parser.add_argument('-s', '--summary', metavar='level', type=str, 
                     help='A string specifying which level, [daily|weekly|id], of summary to use.')
 parser.add_argument('-t', '--time', metavar='max_time', type=int, 
@@ -54,7 +57,7 @@ parser.add_argument('--slurmid', metavar='ID', type=str,
                    help='Slurm id, for logging.')
 
 print('parsing args')
-#args = parser.parse_args(['-p', 'pa', '-s', 'id', '-t', '2', '-y', 'overall', '-ni', '5', '-no', '2', '-c' , '1'])
+#args = parser.parse_args(['-p', 'fbmin', '-s', 'weekly', '-t', '2', '-y', 'overall', '-ni', '2', '-no', '2', '-c' , '1', '--slurmid', 'NADA'])
 args = parser.parse_args()
 
 logging.basicConfig(filename='log/abcd-ml_{}.log'.format(args.slurmid), level=logging.DEBUG)
@@ -76,12 +79,21 @@ train_data['sex'] = train_data['sex'].astype('category').cat.codes
 # for thing in zip(range(len(train_data.columns)), train_data.columns):
 #     print(str(thing[0]) + ': ' + thing[1])
 
-pvarranges = {"pa" : {"daily" : range(20,47),
-                     "weekly" : range(47,65),
-                     "id" : range(65,82)},
-             "sleep" : {"daily" : range(84,126),
-                        "weekly" : range(126,154),
-                        "id" : range(154,181)}
+pvarranges = {"fbmin" : {    "daily"  : [20, 35, 114],
+                             "weekly" : [47, 57, 146],
+                             "id"     : [65, 75, 174]},
+              "fbminpa" : {  "daily"  : [20, 35],
+                             "weekly" : [47, 57],
+                             "id"     : [65, 75]},
+              "pa" :        {"daily"  : range(20,47),
+                             "weekly" : range(47,65),
+                             "id"     : range(65,82)},
+             "sleep" :      {"daily"  : range(84,126),
+                             "weekly" : range(126,154),
+                             "id"     : range(154,181)},
+             "pasleep" :    {"daily"  : list(range(20,47)) + list(range(84,126)),
+                             "weekly" : list(range(47,65)) + list(range(126,154)),
+                             "id"     : list(range(65,82)) + list(range(154,181))}
              }
 yvarranges = {"subscale" : range(6, 14),
               "scale" : range(14,16),
@@ -89,10 +101,15 @@ yvarranges = {"subscale" : range(6, 14),
 
 ### problem when pocolrange is a single column, list()ing it doesn't make a list
 ### Sex column is not numeric.
+baselinevars = ['sex', 'interview_age']
 
-pcolrange = pvarranges[args.predictorset][args.summary]
+if args.predictorset == "baseline":
+    pcolnames = baselinevars
+else:    
+    pcolrange = pvarranges[args.predictorset][args.summary]
+    pcolnames = list(train_data.columns[pcolrange]) + baselinevars
+
 ycolrange = yvarranges[args.outcome]
-pcolnames = list(train_data.columns[pcolrange]) + ['sex', 'interview_age']
 if type(ycolrange) is int:
     ycolnames = [train_data.columns[ycolrange]]
 else:
@@ -104,26 +121,35 @@ for thing in zip(range(len(ycolnames)), list(ycolnames)):
     logging.info(str(thing[0]) + ': ' + thing[1])
 
 logging.debug("args.summary is {} of type {} and truth value is {}".format(args.summary, type(args.summary), args.summary == "id"))
-    
-if args.predictorset in ["pa", "sleep"]:
+
+if args.predictorset in ["sleep", "pasleep", "fbmin"]:
+    selectrows = (train_data['has_sleep'] == 1) & (train_data['has_activity'] == 1)
+else:
+    selectrows = train_data['has_activity'] == 1
+
+if args.predictorset in ["pa", "sleep", "pasleep", "fbmin", "fbminpa"]:
     if args.summary in ["daily", "weekly"]:
         timecol = "daynum" if args.summary == "daily" else "weekno"
         timerange = range(0, args.time)
-        timeindex = train_data[timecol].isin(timerange)
-        these_train_data = train_data[pcolnames + ycolnames + [timecol, 'idnum']][timeindex].drop_duplicates()
-        model_suffix="_{}_{}".format(args.summary, args.time)
+        selectrows = selectrows & train_data[timecol].isin(timerange) 
+        these_train_data = train_data[pcolnames + ycolnames + [timecol, 'idnum']][selectrows].drop_duplicates()
         logging.info('Time column is {}, and time range is {}'.format(timecol, list(timerange)))
     elif args.summary == "id":
         logging.debug("colnames to select are {}, {}, {}".format(pcolnames, ycolnames, ['idnum']))
         logging.debug("shape of selection will be {}.".format(train_data[pcolnames + ycolnames + ['idnum']].drop_duplicates().shape))
-        these_train_data = train_data[pcolnames + ycolnames + ['idnum']].drop_duplicates()
-        model_suffix="_{}".format(args.summary)
-    X = these_train_data[pcolnames].to_numpy()
-    Y = these_train_data[ycolnames].to_numpy()
-    groups = these_train_data['idnum'].to_numpy()
+        these_train_data = train_data[pcolnames + ycolnames + ['idnum']][selectrows].drop_duplicates()
+elif args.predictorset == "baseline":
+    these_train_data = train_data[baselinevars + ycolnames + ['idnum']][selectrows].drop_duplicates()
 else:
     logging.error("Other models not yet specified.")
+
+model_suffix="_{}_{}".format(args.summary, args.time)
+
+X = these_train_data[pcolnames].to_numpy()
+Y = these_train_data[ycolnames].to_numpy()
+groups = these_train_data['idnum'].to_numpy()
     
+logging.debug("these_train_data shape is {}".format(these_train_data.shape))    
 
 outname="out/abcd-ml_{}{}".format(args.predictorset, model_suffix)
 logging.info("outfile is {}".format(outname))
@@ -170,6 +196,8 @@ for train_idx, test_idx in cvsplitter_outer.split(X, Y, groups):
               "n_iter" : estimator.named_steps['multitaskelasticnetcv'].n_iter_,
               "score_train" : estimator.score(X_train, Y_train),
               "score_test" : estimator.score(X_test, Y_test),
+              "xnames" : pcolnames,
+              "ynames" : ycolnames,
               "X_train" : X_train,
               "Y_train" : Y_train,
               "X_test" : X_test,
@@ -177,7 +205,8 @@ for train_idx, test_idx in cvsplitter_outer.split(X, Y, groups):
               "Y_pred_train" : estimator.predict(X_train),
               "Y_pred_test" : estimator.predict(X_test),
               "estimator" : estimator}
-    logging.info("Pickling out_dict")
-    dump(out_dict,'{}_s{:03}.pkl'.format(outname, split_index))
+    this_outname = '{}_s{:03}_{}.pkl'.format(outname, split_index, args.slurmid)
+    logging.info("Pickling out_dict to {}".format(this_outname))
+    dump(out_dict,this_outname)
     split_index += 1
 print("Done!")
