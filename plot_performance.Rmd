@@ -12,18 +12,17 @@ library(ggplot2)
 ```
 
 ```{r}
-scores <- fread('model_train_test_scores.csv')
-scores[, c('cv_iter', 'time') := list(
-  ifelse(cv_iter == '', time, cv_iter),
-  ifelse(cv_iter == '', '', time))]
+scores <- fread('model_train_test_scores.csv')[!grepl('old', fn)]
+```
 
+```{r}
 # scores[, score_test := fifelse(score_test < 0, 0, qnorm(score_test))]
 # scores[, score_train := fifelse(score_train < 0, 0, qnorm(score_train))]
 scores_summary <- scores[, list(mean_train = mean(score_train),
                                 mean_test = mean(score_test),
                                 se_train = sd(score_train) / sqrt(.N),
                                 se_test = sd(score_test) / sqrt(.N)),
-                         by = c('mode', 'summary', 'time')]
+                         by = c('predictors', 'outcome', 'summary', 'time')]
 scores_summary[, c('l_train', 'u_train',
                    'l_test', 'u_test') := list(
                      mean_train - 2*se_train,
@@ -31,38 +30,52 @@ scores_summary[, c('l_train', 'u_train',
                      mean_test - 2*se_test,
                      mean_test + 2*se_test)]
 setorder(scores_summary, mean_test)
-scores_summary[, mid := 1:.N]
-scores_summary_l <- melt(scores_summary, id.vars = c('mode', 'summary', 'time', 'mid'))
+scores_summary[, mid := 1:.N, by = 'outcome']
+scores_summary_l <- melt(scores_summary, id.vars = c('predictors', 'outcome', 'summary', 'time', 'mid'))
 scores_summary_l[, c('variable', 'train/test') := list(gsub('(.*)_(.*)', '\\1', variable),
                                                  gsub('(.*)_(.*)', '\\2', variable))]
 scores_summary_w <- dcast(scores_summary_l, ... ~ variable)
+```
+
+```{r}
 ggplot(scores_summary_w, aes(x = mid, y = mean, group = `train/test`, color = `train/test`)) + 
   geom_point() + 
-  geom_errorbar(aes(ymin = l, ymax = u), width = 0)
+  geom_errorbar(aes(ymin = l, ymax = u), width = 0) + 
+  facet_grid(~ outcome)
+```
 
-model_summary <- unique(scores_summary_w[, c('mode', 'summary', 'time', 'mid')])
-model_summary[, time := ifelse(time == '', '', paste0('_', time))]
+```{r}
+model_summary <- unique(scores_summary_w[, c('predictors', 'outcome', 'summary', 'time', 'mid')])
 model_summary[, c('summary', 'time') := list(paste0(summary, time), NULL)]
-model_summary_l <- melt(model_summary, id.vars = 'mid')
+model_summary_l <- melt(model_summary, id.vars = c('outcome', 'mid'))
 model_summary_l[, tick := 1]
 model_summary_l[, c('variable', 'value') := list(paste(variable, value, sep = '_'), NULL)]
 model_summary_w <- dcast(model_summary_l, ... ~ variable, value.var = 'tick', fill = 0)
-model_summary_w_l <- melt(model_summary_w, id.vars = 'mid')
+model_summary_w_l <- melt(model_summary_w, id.vars = c('outcome', 'mid'))
+```
+
+```{r}
 ggplot(model_summary_w_l, aes(x = mid, y = variable)) + 
   geom_point(aes(alpha = as.factor(value)), shape = '|', size = 3) +
   theme_minimal() + 
-  theme(legend.position = 'none')
+  theme(legend.position = 'none') + 
+  facet_grid(~ outcome)
+```
 
+```{r}
 library(patchwork)
 ggplot(scores_summary_w, aes(x = mid, y = mean, group = `train/test`, color = `train/test`)) + 
   geom_point() + 
   geom_errorbar(aes(ymin = l, ymax = u), width = 0) + 
+  facet_grid(~ outcome) + 
   labs(y = ~R^2) + 
   theme_minimal() + 
   theme(axis.text.x = element_blank(),
         axis.title.x = element_blank()) + 
 ggplot(model_summary_w_l, aes(x = mid, y = variable)) + 
   geom_point(aes(alpha = as.factor(value)), shape = '|', size = 3) +
+  scale_alpha_manual(breaks = c(0, 1), values = c(0, 1)) + 
+  facet_grid(~ outcome) + 
   theme_minimal() + 
   theme(legend.position = 'none',
         axis.text.x = element_blank(),
