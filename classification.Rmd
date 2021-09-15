@@ -1,0 +1,104 @@
+---
+title: "classification"
+author: "Dani Cosme"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    theme: united
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+options(scipen=999)
+```
+
+# load packages
+```{r}
+library(pacman)
+pacman::p_load(broom, tidyverse, caret, purrr, data.table, patchwork, install = TRUE)
+```
+
+# load and tidy data
+
+Recode continuous scores to the following classes:
+< 70 = below clinical range
+70 and above = above clinical range
+
+```{r}
+# define function to read in files
+read_function = function(file) {
+  read.csv(file, stringsAsFactors = FALSE) %>%
+    mutate(Y_test = ifelse(Y_test < 70, "below", "above"),
+           Y_pred_test = ifelse(Y_test < 70, "below", "above"),
+           Y_test = as.factor(Y_test),
+           Y_pred_test = factor(Y_pred_test, levels = c("above", "below")))
+}
+
+# read in files
+scores = fs::dir_ls("csv", regexp = ".*csv") %>%
+  map_dfr(read_function)
+
+# generate confusion matrices
+cmats = scores %>%
+  group_by(predictors, outcome, summary, time) %>%
+  nest() %>%
+  mutate(cmat = map(data, ~ caret::confusionMatrix(.$Y_test, .$Y_pred_test)),
+         output = map(cmat, broom::tidy)) %>%
+  unnest(output) %>%
+  select(-cmat, -data)
+```
+
+# plot accuracy
+
+Other metrics that could be plotted instead:
+
+`r unique(cmats$term)`
+
+```{r}
+# subset accuracy
+accuracy = cmats %>%
+  filter(term == "accuracy") %>% 
+  ungroup() %>%
+  arrange(estimate) %>%
+  group_by(outcome) %>%
+  mutate(mid = row_number(),
+         time = as.character(time)) %>%
+  data.table()
+
+# prep data for lower plot panel
+model_summary <- unique(accuracy[, c('predictors', 'outcome', 'summary', 'time', 'mid')])
+model_summary[, c('summary', 'time') := list(paste0(summary, time), NULL)]
+model_summary_l <- melt(model_summary, id.vars = c('outcome', 'mid'))
+model_summary_l[, tick := 1]
+model_summary_l[, c('variable', 'value') := list(paste(variable, value, sep = '_'), NULL)]
+model_summary_w <- dcast(model_summary_l, ... ~ variable, value.var = 'tick', fill = 0)
+model_summary_w_l <- melt(model_summary_w, id.vars = c('outcome', 'mid'))
+
+# plot
+accuracy %>% 
+  ggplot(aes(x = mid, y = estimate)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0) + 
+  facet_grid(~ outcome) +
+  labs(y = "Accuracy") +
+  theme_minimal() + 
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank()) + 
+ggplot(model_summary_w_l, aes(x = mid, y = variable)) + 
+  geom_point(aes(alpha = as.factor(value)), shape = '|', size = 3) +
+  scale_alpha_manual(breaks = c(0, 1), values = c(0, 1)) + 
+  facet_grid(~ outcome) + 
+  theme_minimal() + 
+  theme(legend.position = 'none',
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank()) +
+  labs(y = 'Model Property') + 
+plot_layout(design = "A\nB")
+```
