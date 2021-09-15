@@ -22,7 +22,9 @@ options(scipen=999)
 # load packages
 ```{r}
 library(pacman)
-pacman::p_load(broom, tidyverse, caret, purrr, data.table, patchwork, install = TRUE)
+pacman::p_load(broom, tidyverse, caret, purrr, data.table, patchwork, furrr, install = TRUE)
+setDTthreads(4)
+future::plan(future::multisession(workers = 4))
 ```
 
 # load and tidy data
@@ -35,27 +37,42 @@ Recode continuous scores to the following classes:
 # define function to read in files
 read_function = function(file) {
   read.csv(file, stringsAsFactors = FALSE) %>%
-    mutate(Y_test = ifelse(Y_test < 70, "below", "above"),
-           Y_pred_test = ifelse(Y_test < 70, "below", "above"),
-           Y_test = as.factor(Y_test),
-           Y_pred_test = factor(Y_pred_test, levels = c("above", "below")))
+    mutate(Y_test_c = ifelse(Y_test < 70, "below", "above"),
+           Y_pred_test_c = ifelse(Y_pred_test < 70, "below", "above"),
+           Y_test_c = factor(Y_test_c, levels = c("above", "below")),
+           Y_pred_test_c = factor(Y_pred_test_c, levels = c("above", "below")))
 }
 
 # read in files
 scores = fs::dir_ls("csv", regexp = ".*csv") %>%
-  map_dfr(read_function)
+  future_map_dfr(read_function)
+
+# plots <- scores %>%
+#   group_by(predictors, outcome, summary, time) %>%
+#   nest() %>%
+#   mutate(plot = map(data, ~ ggplot(., aes(x = Y_test, y = Y_pred_test)) +
+#                       geom_hex(aes(fill = ..count.., color = ..count..)) + 
+#                       geom_hline(yintercept = 70) + 
+#                       geom_vline(xintercept = 70) + 
+#                       theme_minimal() + 
+#                       labs(title = unique(.$fn))))
+# 
+# distinct(select(scores, predictors, outcome, summary, time))
+# 
+# filter(plots, predictors == 'pa', outcome == 'overall', summary == 'weekly', time == '1')$plot
 
 # generate confusion matrices
 cmats = scores %>%
-  group_by(predictors, outcome, summary, time) %>%
+  group_by(predictors, outcome, summary, time, cv_iter) %>%
   nest() %>%
-  mutate(cmat = map(data, ~ caret::confusionMatrix(.$Y_test, .$Y_pred_test)),
-         output = map(cmat, broom::tidy)) %>%
+  mutate(output = map(data, ~ broom::tidy(caret::confusionMatrix(data = .$Y_pred_test_c, reference = .$Y_test_c)))) %>%
   unnest(output) %>%
-  select(-cmat, -data)
+  select(-data)
 ```
 
 # plot accuracy
+
+Black is accuracy, red is prevalence.
 
 Other metrics that could be plotted instead:
 
@@ -65,12 +82,31 @@ Other metrics that could be plotted instead:
 # subset accuracy
 accuracy = cmats %>%
   filter(term == "accuracy") %>% 
+  group_by(predictors, outcome, summary, time) %>%
+  summarize(mean_qnorm = mean(qnorm(estimate)),
+            sd_qnorm = sd(qnorm(estimate)),
+            estimate = pnorm(mean_qnorm),
+            u = pnorm(mean_qnorm + 2*sd_qnorm),
+            l = pnorm(mean_qnorm - 2*sd_qnorm)) %>%
   ungroup() %>%
   arrange(estimate) %>%
   group_by(outcome) %>%
   mutate(mid = row_number(),
          time = as.character(time)) %>%
   data.table()
+
+
+prevalence = cmats %>%
+  filter(term == "prevalence") %>% 
+  group_by(predictors, outcome, summary, time) %>%
+  summarize(mean_qnorm = mean(qnorm(estimate)),
+            sd_qnorm = sd(qnorm(estimate)),
+            p_estimate = 1 - pnorm(mean_qnorm),
+            p_u = 1 - pnorm(mean_qnorm + 2*sd_qnorm),
+            p_l = 1 - pnorm(mean_qnorm - 2*sd_qnorm)) %>%
+  mutate(time = as.character(time)) %>%
+  data.table()
+accuracy = prevalence[, c('predictors', 'outcome', 'summary', 'time', 'p_estimate', 'p_u', 'p_l')][accuracy, on = c('predictors', 'outcome', 'summary', 'time')]
 
 # prep data for lower plot panel
 model_summary <- unique(accuracy[, c('predictors', 'outcome', 'summary', 'time', 'mid')])
@@ -84,8 +120,10 @@ model_summary_w_l <- melt(model_summary_w, id.vars = c('outcome', 'mid'))
 # plot
 accuracy %>% 
   ggplot(aes(x = mid, y = estimate)) + 
-  geom_point() + 
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0) + 
+  geom_ribbon(aes(ymin = p_l, ymax = p_u), width = 0, color = 'red', alpha = .5) + 
+  geom_errorbar(aes(ymin = l, ymax = u), width = 0) + 
+  geom_point(size = 1.5) + 
+  geom_point(aes(y = p_estimate), color = 'red', size = .75) +
   facet_grid(~ outcome) +
   labs(y = "Accuracy") +
   theme_minimal() + 
@@ -102,3 +140,4 @@ ggplot(model_summary_w_l, aes(x = mid, y = variable)) +
   labs(y = 'Model Property') + 
 plot_layout(design = "A\nB")
 ```
+
